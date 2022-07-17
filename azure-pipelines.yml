@@ -1,0 +1,108 @@
+trigger:
+  batch: true
+  branches:
+    include:
+    - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+- name: templateFilePath
+  value: '$(Pipeline.Workspace)/drop/main.bicep'
+- name: parametersFolderPath
+  value: '$(Pipeline.Workspace)/drop/params'
+- name: location
+  value: 'WestEurope'
+- name: serviceConnection
+  value: 'Your Service Connection'
+
+stages:
+- stage: 'Build and Publish'
+  jobs:
+  - job: Build
+    displayName:
+    steps:
+    - script: |
+        az bicep build --file ${{variables.templateFilePath}}
+
+  - job: Publish
+    displayName: Publish Artifacts
+    dependsOn: Build
+    steps:
+    - task: CopyFiles@2
+      displayName: 'Copy files'
+      inputs:
+        contents: '**'
+        targetFolder: '$(Build.ArtifactStagingDirectory)'
+
+    - publish: '$(Build.ArtifactStagingDirectory)'
+      displayName: 'Publish files'
+      artifact: drop
+
+- stage: Preview
+  jobs:
+  - job: Validate
+    displayName: 'Validate Bicep code'
+    steps:
+    - download: current
+      artifact: drop
+    - task: AzureCLI@2
+      name: RunPreflightValidation
+      displayName: 'Run preflight validation'
+      inputs:
+        azureSubscription: ${{variables.serviceConnection}}
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az deployment sub validate \
+          --location ${{variables.location}} \
+          --template-file ${{variables.templateFilePath}} \
+          --parameters ${{variables.parametersFolderPath}}/main.parameters.json \
+          --name $(Build.BuildNumber)
+  
+  - job: 'What If'
+    displayName: 'Preview Azure Changes'
+    dependsOn: Validate
+    steps:
+    - download: current
+      artifact: drop
+    - task: AzureCLI@2
+      name: RunWhatIf
+      displayName: 'Run what-if'
+      inputs:
+        azureSubscription: ${{variables.serviceConnection}}
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az deployment sub what-if \
+          --location ${{variables.location}} \
+          --template-file ${{variables.templateFilePath}} \
+          --parameters ${{variables.parametersFolderPath}}/main.parameters.json \
+          --name $(Build.BuildNumber)
+
+- stage: Deploy
+  jobs:
+  - deployment: DeployInfrastructure
+    displayName: Deploy infrastructure
+    environment: 'azlabs-bicep'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - download: current
+              artifact: drop
+            - task: AzureCLI@2
+              name: DeployBicepFile
+              displayName: Deploy Bicep file
+              inputs:
+                azureSubscription: ${{variables.serviceConnection}}
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  az deployment sub create \
+                    --location ${{variables.location}} \
+                    --template-file ${{variables.templateFilePath}} \
+                    --parameters ${{variables.parametersFolderPath}}/main.parameters.json \
+                    --name $(Build.DefinitionName)-$(Build.BuildNumber)
+
